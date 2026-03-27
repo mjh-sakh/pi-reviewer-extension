@@ -93,12 +93,18 @@ export async function executeReviewerBridge(
   ctx: ExtensionContext,
   dependencies?: ReviewerSessionFactoryDependencies,
   onUpdate?: (result: { content: Array<{ type: "text"; text: string }>; details: ReviewerBridgeToolDetails }) => void,
+  signal?: AbortSignal,
 ) {
   const { resetSession, ...promptInput } = params;
   const prompt = buildReviewerBridgePrompt(promptInput);
 
   try {
     return await state.lock.runExclusive(async () => {
+      // Early abort check: before any side effects (session reset or creation)
+      if (signal?.aborted) {
+        throw new Error("Reviewer bridge aborted before session setup");
+      }
+
       if (resetSession) {
         await resetReviewerSessionStateLocked(state, {
           clearOwner: false,
@@ -117,78 +123,110 @@ export async function executeReviewerBridge(
         dependencies,
       );
 
-      const modelLabel = session.model
-        ? `${session.model.id}:${session.thinkingLevel}`
-        : undefined;
+      // Second abort check: after session setup, before subscribe/prompt
+      if (signal?.aborted) {
+        throw new Error("Reviewer bridge aborted after session setup");
+      }
 
-      let turns = 0;
-      const accumulated: ReviewerBridgeUsage = { input: 0, output: 0, cacheRead: 0 };
-
-      let unsubscribeCalled = false;
-      let rawUnsubscribe: (() => void) | undefined;
-      let trackingActive = true;
-      const safeUnsubscribe = () => {
-        if (unsubscribeCalled) return;
-        unsubscribeCalled = true;
-        trackingActive = false;
-        try { rawUnsubscribe?.(); } catch { /* ignore unsubscribe errors */ }
+      // Set up abort forwarding: when signal fires, abort the reviewer session.
+      // Registered inside the lock so it always targets the session this invocation holds.
+      let abortRequested = false;
+      const onAbort = () => {
+        abortRequested = true;
+        void session.abort().catch(() => {});
       };
-
-      const publicUsage = () => ({
-        input: accumulated.input,
-        output: accumulated.output,
-        cacheRead: accumulated.cacheRead,
-      });
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       try {
-        rawUnsubscribe = session.subscribe((event: AgentSessionEvent) => {
-          if (!trackingActive) return;
-          if (event.type !== "turn_end") return;
-          // Assumes: (1) subscribe delivers future events only (no replay), and
-          // (2) all turn_end events for this prompt arrive before session.prompt() resolves.
-          const msg = event.message;
-          if (!msg || typeof msg !== "object" || !("role" in msg) || !("usage" in msg)) return;
-          const { role, usage } = msg as { role: unknown; usage: unknown };
-          if (role !== "assistant" || !usage || typeof usage !== "object") return;
-          const u = usage as Record<string, unknown>;
-          const safeNum = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
-          accumulated.input += safeNum(u.input);
-          accumulated.output += safeNum(u.output);
-          accumulated.cacheRead += safeNum(u.cacheRead);
-          turns++;
-          try {
-            onUpdate?.({
-              content: [{ type: "text", text: formatReviewerUsage(turns, accumulated, modelLabel) }],
-              details: { turns, usage: publicUsage(), model: modelLabel },
-            });
-          } catch {
-            // onUpdate errors must not interrupt reviewer execution
-          }
+        const modelLabel = session.model
+          ? `${session.model.id}:${session.thinkingLevel}`
+          : undefined;
+
+        let turns = 0;
+        const accumulated: ReviewerBridgeUsage = { input: 0, output: 0, cacheRead: 0 };
+
+        let unsubscribeCalled = false;
+        let rawUnsubscribe: (() => void) | undefined;
+        let trackingActive = true;
+        const safeUnsubscribe = () => {
+          if (unsubscribeCalled) return;
+          unsubscribeCalled = true;
+          trackingActive = false;
+          try { rawUnsubscribe?.(); } catch { /* ignore unsubscribe errors */ }
+        };
+
+        const publicUsage = () => ({
+          input: accumulated.input,
+          output: accumulated.output,
+          cacheRead: accumulated.cacheRead,
         });
 
-        const messageBoundary = session.messages.length;
-        await session.prompt(prompt);
-        const response = extractCurrentReviewerResponseText(session.messages, messageBoundary);
-        safeUnsubscribe(); // stop before maintenance so compaction turns are not counted
+        try {
+          rawUnsubscribe = session.subscribe((event: AgentSessionEvent) => {
+            if (!trackingActive) return;
+            if (event.type !== "turn_end") return;
+            // Assumes: (1) subscribe delivers future events only (no replay), and
+            // (2) all turn_end events for this prompt arrive before session.prompt() resolves.
+            const msg = event.message;
+            if (!msg || typeof msg !== "object" || !("role" in msg) || !("usage" in msg)) return;
+            const { role, usage } = msg as { role: unknown; usage: unknown };
+            if (role !== "assistant" || !usage || typeof usage !== "object") return;
+            const u = usage as Record<string, unknown>;
+            const safeNum = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+            accumulated.input += safeNum(u.input);
+            accumulated.output += safeNum(u.output);
+            accumulated.cacheRead += safeNum(u.cacheRead);
+            turns++;
+            try {
+              onUpdate?.({
+                content: [{ type: "text", text: formatReviewerUsage(turns, accumulated, modelLabel) }],
+                details: { turns, usage: publicUsage(), model: modelLabel },
+              });
+            } catch {
+              // onUpdate errors must not interrupt reviewer execution
+            }
+          });
 
-        recordReviewerInvocationSuccess(state);
-        await runReviewerMaintenanceLocked(state, session);
+          const messageBoundary = session.messages.length;
+          await session.prompt(prompt);
 
-        return {
-          content: [{ type: "text" as const, text: response }],
-          details: {
-            response,
-            turns,
-            usage: publicUsage(),
-            model: modelLabel,
-          } satisfies ReviewerBridgeToolDetails,
-        };
-      } catch (error) {
-        safeUnsubscribe(); // stop tracking before failure handling, which may reset/dispose session
-        await handleReviewerInvocationFailureLocked(state, error);
-        throw error;
+          // Post-prompt abort guard: session.abort() may cause prompt() to resolve rather than reject.
+          // Do not record success or extract a potentially partial response.
+          if (abortRequested) {
+            throw new Error("Reviewer bridge aborted during prompt");
+          }
+
+          const response = extractCurrentReviewerResponseText(session.messages, messageBoundary);
+          safeUnsubscribe(); // stop before maintenance so compaction turns are not counted
+
+          // Remove listener before maintenance: a late abort must not call session.abort()
+          // during compaction. The outer finally is a no-op after this.
+          signal?.removeEventListener("abort", onAbort);
+
+          recordReviewerInvocationSuccess(state);
+          await runReviewerMaintenanceLocked(state, session);
+
+          return {
+            content: [{ type: "text" as const, text: response }],
+            details: {
+              response,
+              turns,
+              usage: publicUsage(),
+              model: modelLabel,
+            } satisfies ReviewerBridgeToolDetails,
+          };
+        } catch (error) {
+          safeUnsubscribe(); // stop tracking before failure handling, which may reset/dispose session
+          if (!abortRequested) {
+            // Only record genuine failures — user-initiated aborts must not degrade session health.
+            await handleReviewerInvocationFailureLocked(state, error);
+          }
+          throw error;
+        } finally {
+          safeUnsubscribe(); // no-op if catch already ran; guards the success early-return path too
+        }
       } finally {
-        safeUnsubscribe(); // no-op if catch already ran; guards the success early-return path too
+        signal?.removeEventListener("abort", onAbort); // always remove listener regardless of outcome
       }
     });
   } catch (error) {
@@ -215,7 +253,7 @@ export function createReviewerBridgeTool(
     ],
     parameters: REVIEWER_BRIDGE_TOOL_PARAMETERS,
 
-    async execute(_toolCallId, params, _signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       try {
         onUpdate?.({
           content: [{ type: "text", text: "Consulting reviewer..." }],
@@ -225,7 +263,7 @@ export function createReviewerBridgeTool(
         // best-effort initial notification
       }
 
-      return executeReviewerBridge(state, params, ctx, dependencies, onUpdate);
+      return executeReviewerBridge(state, params, ctx, dependencies, onUpdate, signal);
     },
 
     renderCall(args, theme) {

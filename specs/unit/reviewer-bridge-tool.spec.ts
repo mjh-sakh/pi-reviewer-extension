@@ -668,6 +668,54 @@ function createFakeReviewerSessionWithTurnEvents(
   };
 }
 
+function createInterruptibleReviewerSession(responseText = "interruptible answer") {
+  const messages: unknown[] = [];
+  let resolvePrompt: (() => void) | undefined;
+  let rejectPrompt: ((error: Error) => void) | undefined;
+
+  const abort = vi.fn(async () => {
+    rejectPrompt?.(new Error("Reviewer session aborted"));
+  });
+
+  const subscribe = vi.fn(() => vi.fn());
+
+  const prompt = vi.fn((input: string) => {
+    return new Promise<void>((resolve, reject) => {
+      resolvePrompt = () => {
+        messages.push({ role: "user", content: input, timestamp: Date.now() });
+        messages.push({
+          role: "assistant",
+          content: [{ type: "text", text: responseText }],
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: {} },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        });
+        resolve();
+      };
+      rejectPrompt = reject;
+    });
+  });
+
+  const session = {
+    sessionId: "interruptible",
+    messages,
+    prompt,
+    subscribe,
+    abort,
+    dispose: vi.fn(),
+    model: undefined,
+    thinkingLevel: "off",
+  } as unknown as AgentSession;
+
+  return {
+    session,
+    messages,
+    prompt,
+    abort,
+    complete: () => resolvePrompt?.(),
+  };
+}
+
 function createRenderContext() {
   return {
     args: {},
@@ -1148,6 +1196,188 @@ describe("reviewer bridge usage tracking", () => {
 
     expect(result.details?.response).toBe("answer");
     expect(callCount).toBe(1); // initial update fired once, threw, execution continued
+  });
+});
+
+describe("reviewer bridge abort / interrupt", () => {
+  it("does not call prompt or record failure when signal is already aborted on entry", async () => {
+    const state = createReviewerSessionState();
+    const ctx = createExtensionContext("claude-sonnet-4.6");
+    const reviewer = createInterruptibleReviewerSession();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      executeReviewerBridge(
+        state, { question: "Will this be aborted?" }, ctx, createDependencies(reviewer.session), undefined, controller.signal,
+      ),
+    ).rejects.toThrow(/reviewer bridge failed/i);
+
+    expect(reviewer.prompt).not.toHaveBeenCalled();
+    expect(state.usage.invocationFailureCount).toBe(0);
+    expect(state.usage.consecutiveInvocationFailureCount).toBe(0);
+  });
+
+  it("does not call prompt or record failure when signal aborts during session creation", async () => {
+    const state = createReviewerSessionState();
+    const ctx = createExtensionContext("claude-sonnet-4.6");
+    const controller = new AbortController();
+    const reviewer = createInterruptibleReviewerSession();
+
+    const slowDeps: ReviewerSessionFactoryDependencies = {
+      ...createDependencies(reviewer.session),
+      createAgentSession: vi.fn(async () => {
+        controller.abort(); // fire abort while session is being created
+        return { session: reviewer.session };
+      }),
+    };
+
+    await expect(
+      executeReviewerBridge(
+        state, { question: "Will this be aborted mid-creation?" }, ctx, slowDeps, undefined, controller.signal,
+      ),
+    ).rejects.toThrow(/reviewer bridge failed/i);
+
+    expect(reviewer.prompt).not.toHaveBeenCalled();
+    expect(state.usage.invocationFailureCount).toBe(0);
+    expect(state.usage.consecutiveInvocationFailureCount).toBe(0);
+  });
+
+  it("calls session.abort() and does not record failure when signal fires during prompt", async () => {
+    const state = createReviewerSessionState();
+    const ctx = createExtensionContext("claude-sonnet-4.6");
+    const reviewer = createInterruptibleReviewerSession();
+    const controller = new AbortController();
+
+    const bridgePromise = executeReviewerBridge(
+      state, { question: "Will this be interrupted?" }, ctx, createDependencies(reviewer.session), undefined, controller.signal,
+    );
+
+    // Yield past all setup microtasks so the prompt is actually hanging before we abort
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    controller.abort();
+
+    await expect(bridgePromise).rejects.toThrow(/reviewer bridge failed/i);
+
+    expect(reviewer.abort).toHaveBeenCalledTimes(1);
+    expect(state.usage.invocationFailureCount).toBe(0);
+    expect(state.usage.consecutiveInvocationFailureCount).toBe(0);
+  });
+
+  it("does not call prompt on a queued invocation that was aborted while waiting for the lock", async () => {
+    const state = createReviewerSessionState();
+    const ctx = createExtensionContext("claude-sonnet-4.6");
+    const reviewer = createInterruptibleReviewerSession("first answer");
+    const deps = createDependencies(reviewer.session);
+
+    // First call acquires lock and hangs in prompt
+    const firstPromise = executeReviewerBridge(state, { question: "First question" }, ctx, deps);
+
+    // Yield past setup so the first call actually holds the lock in prompt()
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Second call: pre-aborted, queues behind first
+    const secondController = new AbortController();
+    secondController.abort();
+    const secondPromise = executeReviewerBridge(
+      state, { question: "Second question (aborted)" }, ctx, deps, undefined, secondController.signal,
+    );
+
+    // Release first call
+    reviewer.complete();
+    const firstResult = await firstPromise;
+
+    expect(firstResult.details.response).toBe("first answer");
+
+    await expect(secondPromise).rejects.toThrow(/reviewer bridge failed/i);
+
+    // prompt called exactly once — only for the first call
+    expect(reviewer.prompt).toHaveBeenCalledTimes(1);
+    expect(state.usage.invocationFailureCount).toBe(0);
+  });
+
+  it("succeeds normally when signal is provided but never aborted", async () => {
+    const state = createReviewerSessionState();
+    const ctx = createExtensionContext("claude-sonnet-4.6");
+    const reviewer = createInterruptibleReviewerSession("clean answer");
+    const controller = new AbortController(); // signal exists but is never aborted
+
+    const bridgePromise = executeReviewerBridge(
+      state, { question: "Normal question" }, ctx, createDependencies(reviewer.session), undefined, controller.signal,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    reviewer.complete();
+
+    const result = await bridgePromise;
+
+    expect(result.details.response).toBe("clean answer");
+    expect(reviewer.abort).not.toHaveBeenCalled();
+    expect(state.usage.invocationFailureCount).toBe(0);
+    expect(state.usage.consecutiveInvocationFailureCount).toBe(0);
+  });
+
+  it("execute() in createReviewerBridgeTool forwards the signal to executeReviewerBridge", async () => {
+    const state = createReviewerSessionState();
+    const ctx = createExtensionContext("claude-sonnet-4.6");
+    const reviewer = createInterruptibleReviewerSession();
+    const tool = createReviewerBridgeTool(state, createDependencies(reviewer.session));
+    const controller = new AbortController();
+    controller.abort(); // pre-aborted
+
+    await expect(
+      tool.execute("test-id", { question: "Will signal be forwarded?" }, controller.signal, undefined, ctx),
+    ).rejects.toThrow(/reviewer bridge failed/i);
+
+    expect(reviewer.prompt).not.toHaveBeenCalled();
+    expect(state.usage.invocationFailureCount).toBe(0);
+  });
+
+  it("removes the abort listener after the call completes, so late abort does not call session.abort()", async () => {
+    const state = createReviewerSessionState();
+    const ctx = createExtensionContext("claude-sonnet-4.6");
+    const reviewer = createInterruptibleReviewerSession("done");
+    const controller = new AbortController();
+
+    const bridgePromise = executeReviewerBridge(
+      state, { question: "Cleanup test" }, ctx, createDependencies(reviewer.session), undefined, controller.signal,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    reviewer.complete();
+    await bridgePromise;
+
+    // Abort fires AFTER the call completed — listener must already be removed
+    controller.abort();
+    await Promise.resolve(); // let any pending microtasks settle
+
+    expect(reviewer.abort).not.toHaveBeenCalled();
+  });
+
+  it("removes the abort listener even when session.subscribe() throws", async () => {
+    const state = createReviewerSessionState();
+    const ctx = createExtensionContext("claude-sonnet-4.6");
+    const reviewer = createInterruptibleReviewerSession();
+    const subscribeSpy = vi.fn(() => { throw new Error("subscribe exploded"); });
+    const sessionWithBadSubscribe = {
+      ...reviewer.session,
+      subscribe: subscribeSpy,
+    } as unknown as AgentSession;
+
+    const controller = new AbortController();
+
+    await expect(
+      executeReviewerBridge(
+        state, { question: "subscribe throws" }, ctx, createDependencies(sessionWithBadSubscribe), undefined, controller.signal,
+      ),
+    ).rejects.toThrow(/reviewer bridge failed/i);
+
+    // Firing after the failed call must not invoke session.abort()
+    controller.abort();
+    await Promise.resolve();
+
+    expect(reviewer.abort).not.toHaveBeenCalled();
   });
 });
 
