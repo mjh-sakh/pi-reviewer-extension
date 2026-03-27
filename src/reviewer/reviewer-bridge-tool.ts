@@ -1,5 +1,6 @@
-import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import type { AgentSessionEvent, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
+import { Text } from "@mariozechner/pi-tui";
 
 import {
   ensureReviewerSessionLocked,
@@ -33,9 +34,43 @@ export const REVIEWER_BRIDGE_TOOL_PARAMETERS = Type.Object(
 
 export type ReviewerBridgeToolParams = Static<typeof REVIEWER_BRIDGE_TOOL_PARAMETERS>;
 
-export interface ReviewerBridgeToolDetails {
-  response: string;
+export interface ReviewerBridgeUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
 }
+
+export interface ReviewerBridgeToolDetails {
+  response?: string;
+  turns?: number;
+  usage?: ReviewerBridgeUsage;
+  model?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers (style mirrors pi-subagents/formatters.ts)
+// ---------------------------------------------------------------------------
+
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 10000) {
+    const k = n / 1000;
+    return k === Math.floor(k) ? `${Math.floor(k)}k` : `${k.toFixed(1)}k`;
+  }
+  return `${Math.round(n / 1000)}k`;
+}
+
+export function formatReviewerUsage(turns: number, usage: ReviewerBridgeUsage, model?: string): string {
+  const parts: string[] = [];
+  if (turns) parts.push(`${turns} turn${turns > 1 ? "s" : ""}`);
+  if (usage.input) parts.push(`in:${formatTokens(usage.input)}`);
+  if (usage.output) parts.push(`out:${formatTokens(usage.output)}`);
+  if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
+  if (model) parts.push(model);
+  return parts.join(" ");
+}
+
+// ---------------------------------------------------------------------------
 
 function getReviewerMainModel(ctx: ExtensionContext): ReviewerMainModel | undefined {
   if (!ctx.model) {
@@ -57,6 +92,7 @@ export async function executeReviewerBridge(
   params: ReviewerBridgeToolParams,
   ctx: ExtensionContext,
   dependencies?: ReviewerSessionFactoryDependencies,
+  onUpdate?: (result: { content: Array<{ type: "text"; text: string }>; details: ReviewerBridgeToolDetails }) => void,
 ) {
   const { resetSession, ...promptInput } = params;
   const prompt = buildReviewerBridgePrompt(promptInput);
@@ -81,25 +117,82 @@ export async function executeReviewerBridge(
         dependencies,
       );
 
+      const modelLabel = session.model
+        ? `${session.model.id}:${session.thinkingLevel}`
+        : undefined;
+
+      let turns = 0;
+      const accumulated: ReviewerBridgeUsage = { input: 0, output: 0, cacheRead: 0 };
+
+      let unsubscribeCalled = false;
+      let rawUnsubscribe: (() => void) | undefined;
+      let trackingActive = true;
+      const safeUnsubscribe = () => {
+        if (unsubscribeCalled) return;
+        unsubscribeCalled = true;
+        trackingActive = false;
+        try { rawUnsubscribe?.(); } catch { /* ignore unsubscribe errors */ }
+      };
+
+      const publicUsage = () => ({
+        input: accumulated.input,
+        output: accumulated.output,
+        cacheRead: accumulated.cacheRead,
+      });
+
       try {
+        rawUnsubscribe = session.subscribe((event: AgentSessionEvent) => {
+          if (!trackingActive) return;
+          if (event.type !== "turn_end") return;
+          // Assumes: (1) subscribe delivers future events only (no replay), and
+          // (2) all turn_end events for this prompt arrive before session.prompt() resolves.
+          const msg = event.message;
+          if (!msg || typeof msg !== "object" || !("role" in msg) || !("usage" in msg)) return;
+          const { role, usage } = msg as { role: unknown; usage: unknown };
+          if (role !== "assistant" || !usage || typeof usage !== "object") return;
+          const u = usage as Record<string, unknown>;
+          const safeNum = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+          accumulated.input += safeNum(u.input);
+          accumulated.output += safeNum(u.output);
+          accumulated.cacheRead += safeNum(u.cacheRead);
+          turns++;
+          try {
+            onUpdate?.({
+              content: [{ type: "text", text: formatReviewerUsage(turns, accumulated, modelLabel) }],
+              details: { turns, usage: publicUsage(), model: modelLabel },
+            });
+          } catch {
+            // onUpdate errors must not interrupt reviewer execution
+          }
+        });
+
         const messageBoundary = session.messages.length;
         await session.prompt(prompt);
         const response = extractCurrentReviewerResponseText(session.messages, messageBoundary);
+        safeUnsubscribe(); // stop before maintenance so compaction turns are not counted
 
         recordReviewerInvocationSuccess(state);
         await runReviewerMaintenanceLocked(state, session);
 
         return {
           content: [{ type: "text" as const, text: response }],
-          details: { response } satisfies ReviewerBridgeToolDetails,
+          details: {
+            response,
+            turns,
+            usage: publicUsage(),
+            model: modelLabel,
+          } satisfies ReviewerBridgeToolDetails,
         };
       } catch (error) {
+        safeUnsubscribe(); // stop tracking before failure handling, which may reset/dispose session
         await handleReviewerInvocationFailureLocked(state, error);
         throw error;
+      } finally {
+        safeUnsubscribe(); // no-op if catch already ran; guards the success early-return path too
       }
     });
   } catch (error) {
-    throw new Error(`Reviewer bridge failed: ${toErrorMessage(error)}`);
+    throw new Error(`Reviewer bridge failed: ${toErrorMessage(error)}`, { cause: error });
   }
 }
 
@@ -121,13 +214,46 @@ export function createReviewerBridgeTool(
       "Treat the reviewer reply as advisory input and synthesize it into your own final judgment.",
     ],
     parameters: REVIEWER_BRIDGE_TOOL_PARAMETERS,
-    async execute(_toolCallId, params, _signal, onUpdate, ctx) {
-      onUpdate?.({
-        content: [{ type: "text", text: "Consulting reviewer..." }],
-        details: { response: "Consulting reviewer..." },
-      });
 
-      return executeReviewerBridge(state, params, ctx, dependencies);
+    async execute(_toolCallId, params, _signal, onUpdate, ctx) {
+      try {
+        onUpdate?.({
+          content: [{ type: "text", text: "Consulting reviewer..." }],
+          details: {},
+        });
+      } catch {
+        // best-effort initial notification
+      }
+
+      return executeReviewerBridge(state, params, ctx, dependencies, onUpdate);
+    },
+
+    renderCall(args, theme) {
+      const question = args.question ?? "";
+      const preview = question.length > 60 ? `${question.slice(0, 60)}…` : question;
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("reviewer "))}${theme.fg("muted", preview)}`,
+        0, 0,
+      );
+    },
+
+    renderResult(result, { isPartial }, theme) {
+      const d = result.details;
+      const emptyUsage: ReviewerBridgeUsage = { input: 0, output: 0, cacheRead: 0 };
+      if (isPartial) {
+        const statsText = d?.turns
+          ? formatReviewerUsage(d.turns, d.usage ?? emptyUsage, d.model)
+          : "thinking…";
+        return new Text(theme.fg("warning", `... ${statsText}`), 0, 0);
+      }
+
+      const statsLine = d?.turns
+        ? formatReviewerUsage(d.turns, d.usage ?? emptyUsage, d.model)
+        : "";
+
+      const response = d?.response ?? (result.content[0] as { text?: string })?.text ?? "";
+      const lines = [response, ...(statsLine ? [theme.fg("dim", statsLine)] : [])].join("\n");
+      return new Text(lines, 0, 0);
     },
   };
 }
