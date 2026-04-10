@@ -1413,6 +1413,7 @@ describe("reviewer bridge rendering", () => {
     expect(lines[0]).toContain("A".repeat(60));
     expect(lines[0]).not.toContain("A".repeat(61));
     expect(lines[0]).toContain("…");
+    expect(lines[0]).toContain("to expand");
   });
 
   it("renderCall shows full question when short", () => {
@@ -1426,6 +1427,36 @@ describe("reviewer bridge rendering", () => {
 
     expect(lines[0]).toContain("Short question?");
     expect(lines[0]).not.toContain("…");
+    expect(lines[0]).not.toContain("to expand");
+  });
+
+  it("renderCall shows the full reviewer input when expanded", () => {
+    const state = createReviewerSessionState();
+    const tool = createReviewerBridgeTool(state);
+    const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t, dim: (t: string) => t };
+    const ctx = { ...createRenderContext(), expanded: true };
+
+    const component = tool.renderCall!(
+      {
+        question: "Should we keep the existing reset semantics for unrelated topics?",
+        context: "The main agent sometimes switches from implementation review to UX review.",
+        focus: "Only consider whether stale reviewer memory can mislead the answer.",
+        resetSession: true,
+      },
+      theme as never,
+      ctx as never,
+    );
+    const rendered = component.render(200).join("\n");
+
+    expect(rendered).toContain("reviewer");
+    expect(rendered).toContain("Question:");
+    expect(rendered).toContain("Should we keep the existing reset semantics for unrelated topics?");
+    expect(rendered).toContain("Context:");
+    expect(rendered).toContain("The main agent sometimes switches from implementation review to UX review.");
+    expect(rendered).toContain("Focus:");
+    expect(rendered).toContain("Only consider whether stale reviewer memory can mislead the answer.");
+    expect(rendered).toContain("Fresh reviewer session requested for this call.");
+    expect(rendered).not.toContain("…");
   });
 
   it("renderResult with isPartial shows spinner and stats line", () => {

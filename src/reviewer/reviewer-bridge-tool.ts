@@ -266,13 +266,47 @@ export function createReviewerBridgeTool(
       return executeReviewerBridge(state, params, ctx, dependencies, onUpdate, signal);
     },
 
-    renderCall(args, theme) {
-      const question = args.question ?? "";
-      const preview = question.length > 60 ? `${question.slice(0, 60)}…` : question;
-      return new Text(
-        `${theme.fg("toolTitle", theme.bold("reviewer "))}${theme.fg("muted", preview)}`,
-        0, 0,
-      );
+    renderCall(args, theme, context) {
+      const question = (args.question ?? "").trim();
+      const reviewerContext = args.context?.trim();
+      const focus = args.focus?.trim();
+
+      if (!context.expanded) {
+        const preview = question.length > 60 ? `${question.slice(0, 60)}…` : question;
+        const hasHiddenDetails =
+          question.length > 60 ||
+          Boolean(reviewerContext) ||
+          Boolean(focus) ||
+          args.resetSession === true;
+        const expandHint = hasHiddenDetails
+          ? ` ${theme.fg("dim", "(Ctrl+O to expand)")}`
+          : "";
+        return new Text(
+          `${theme.fg("toolTitle", theme.bold("reviewer "))}${theme.fg("muted", preview)}${expandHint}`,
+          0,
+          0,
+        );
+      }
+
+      const lines = [
+        theme.fg("toolTitle", theme.bold("reviewer")),
+        theme.fg("muted", "Question:"),
+        theme.fg("toolOutput", question || "(empty question)"),
+      ];
+
+      if (reviewerContext) {
+        lines.push("", theme.fg("muted", "Context:"), theme.fg("toolOutput", reviewerContext));
+      }
+
+      if (focus) {
+        lines.push("", theme.fg("muted", "Focus:"), theme.fg("toolOutput", focus));
+      }
+
+      if (args.resetSession) {
+        lines.push("", theme.fg("warning", "Fresh reviewer session requested for this call."));
+      }
+
+      return new Text(lines.join("\n"), 0, 0);
     },
 
     renderResult(result, { isPartial }, theme) {
