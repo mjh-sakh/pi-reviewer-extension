@@ -19,9 +19,21 @@ export const REVIEWER_BRIDGE_TOOL_NAME = "reviewer_bridge";
 
 export const REVIEWER_BRIDGE_TOOL_PARAMETERS = Type.Object(
   {
-    question: Type.String({ description: "The concrete review question for the reviewer." }),
-    context: Type.Optional(Type.String({ description: "Optional task context the reviewer should consider." })),
-    focus: Type.Optional(Type.String({ description: "Optional review lens or constraint to prioritize." })),
+    question: Type.String({
+      description: "The concrete review question, including the decision, risk, or uncertainty you want help with.",
+    }),
+    context: Type.Optional(
+      Type.String({
+        description:
+          "Task context for the reviewer: app area or repo, goal, likely files/modules/entrypoints, current approach or diff, and any constraints it should keep in mind while navigating.",
+      }),
+    ),
+    focus: Type.Optional(
+      Type.String({
+        description:
+          "Optional review lens or constraint to prioritize, such as correctness, regression risk, test gaps, performance, or API compatibility.",
+      }),
+    ),
     resetSession: Type.Optional(
       Type.Boolean({
         description:
@@ -242,13 +254,15 @@ export function createReviewerBridgeTool(
     name: REVIEWER_BRIDGE_TOOL_NAME,
     label: "Reviewer Bridge",
     description:
-      "Consult an isolated internal reviewer for a concise critique, risk check, or second opinion during the current task.",
-    promptSnippet: "Consult an isolated internal reviewer for concise critique or decision support.",
+      "Consult an isolated internal reviewer for a concise critique, risk check, or second opinion during the current task. Give enough task context for the reviewer to orient quickly.",
+    promptSnippet:
+      "Consult an isolated internal reviewer; include enough task context for it to navigate quickly.",
     promptGuidelines: [
       "Use this tool when you want an independent review of a plan, implementation choice, or risk-heavy change.",
-      "Ask one concrete question and add only the minimal context or focus needed for a useful answer.",
-      "Set resetSession: true when switching to an unrelated review topic or when prior reviewer memory would likely mislead the answer.",
-      "resetSession starts a fresh reviewer session and asks the new question in the same call; it is not a reset-only mode.",
+      "On the first call for a topic, give enough context: app area or repo, goal, and the likely files, modules, or entrypoints involved.",
+      "Anchor the request with concrete context such as file paths, symbols, entrypoints, current approach or diff, and any hard constraints.",
+      "Do not over-explain the codebase; give just enough context so the reviewer can find the right moving parts quickly.",
+      "Set resetSession: true when switching to an unrelated review topic or when prior reviewer memory would likely mislead the answer. resetSession starts a fresh reviewer session and asks the new question in the same call; it is not a reset-only mode.",
       "Treat the reviewer reply as advisory input and synthesize it into your own final judgment.",
     ],
     parameters: REVIEWER_BRIDGE_TOOL_PARAMETERS,

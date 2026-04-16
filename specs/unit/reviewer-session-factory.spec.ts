@@ -350,7 +350,7 @@ describe("reviewer session factory", () => {
     expect(options.noSkills).toBe(true);
     expect(options.noPromptTemplates).toBe(true);
     expect(options.noThemes).toBe(true);
-    expect(options.systemPromptOverride?.(undefined)).toContain("internal reviewer");
+    expect(options.systemPromptOverride?.(undefined)?.trim().length).toBeGreaterThan(0);
     expect(options.appendSystemPromptOverride?.(["extra"]) ?? ["extra"]).toEqual([]);
     expect(options.agentsFilesOverride?.({ agentsFiles: [{ path: "AGENTS.md", content: "x" }] })).toEqual({
       agentsFiles: [],

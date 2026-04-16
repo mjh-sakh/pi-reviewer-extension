@@ -11,13 +11,22 @@ Use the reviewer for short, high-value second opinions, for example:
 
 Do not use it for every step. It adds model cost and grows reviewer context.
 
+When you do use it, the first call for a topic should include enough context so the reviewer can navigate quickly instead of spending its first turn figuring out where to look. Good context usually includes:
+- repo/package or app area
+- the goal or decision under review
+- likely files/modules/entrypoints
+- current approach, diff summary, or suspected issue
+- hard constraints (API contract, migration limits, performance budgets, etc.)
+
+Prefer concrete navigation anchors over generic summaries. File paths, symbol names, and entrypoints are usually more useful than broad architectural prose.
+
 Set `resetSession: true` when you want a fresh reviewer for this call, especially if the next question is unrelated to the prior review thread or if prior reviewer memory would be more misleading than helpful.
 
 Do **not** think of `resetSession` as a reset-only operation. The same call both resets the reviewer session and asks the new question.
 
 ## What happens on each `reviewer_bridge` call
 
-1. The main agent calls `reviewer_bridge` with one concrete question, optional minimal `context`/`focus`, and optional `resetSession`.
+1. The main agent calls `reviewer_bridge` with one concrete question, optional task `context`/`focus`, and optional `resetSession`.
 2. The extension acquires the reviewer lock.
 3. If `resetSession: true`, the extension clears reviewer session state first inside that same serialized execution.
 4. `ensureReviewerSessionLocked(...)` either reuses the current reviewer session or creates one lazily.

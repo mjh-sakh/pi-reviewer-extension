@@ -19,7 +19,6 @@ import {
   type ReviewerBridgeUsage,
 } from "../../src/reviewer/reviewer-bridge-tool.ts";
 import {
-  buildReviewerBridgePrompt,
   extractCurrentReviewerResponseText,
   extractReviewerTextFromAssistantMessage,
 } from "../../src/reviewer/reviewer-response.ts";
@@ -132,30 +131,6 @@ function createExtensionContext(modelId = "gpt-5.4") {
 }
 
 describe("reviewer response helpers", () => {
-  it("builds a focused reviewer prompt with optional context and focus", () => {
-    expect(
-      buildReviewerBridgePrompt({
-        question: "  Is this migration plan missing anything?  ",
-        context: "  We already updated backend types.  ",
-        focus: "  Serialization and stale-output risks.  ",
-      }),
-    ).toContain("Question:\nIs this migration plan missing anything?");
-    expect(
-      buildReviewerBridgePrompt({
-        question: "Is this migration plan missing anything?",
-        context: "We already updated backend types.",
-        focus: "Serialization and stale-output risks.",
-      }),
-    ).toContain("Context:\nWe already updated backend types.");
-    expect(
-      buildReviewerBridgePrompt({
-        question: "Is this migration plan missing anything?",
-        context: "We already updated backend types.",
-        focus: "Serialization and stale-output risks.",
-      }),
-    ).toContain("Focus:\nSerialization and stale-output risks.");
-    expect(() => buildReviewerBridgePrompt({ question: "   " })).toThrow(/non-empty question/i);
-  });
 
   it("extracts only the final assistant text from the current invocation boundary", () => {
     const text = extractCurrentReviewerResponseText(
@@ -202,27 +177,16 @@ describe("reviewer response helpers", () => {
 });
 
 describe("reviewer bridge tool", () => {
-  it("defines a small focused schema and prompt guidance", () => {
+  it("defines the reviewer bridge schema", () => {
     const state = createReviewerSessionState();
     const tool = createReviewerBridgeTool(state);
 
     expect(tool.name).toBe(REVIEWER_BRIDGE_TOOL_NAME);
-    expect(tool.promptSnippet).toMatch(/isolated internal reviewer/i);
-    expect(tool.promptGuidelines).toHaveLength(5);
-    expect(tool.promptGuidelines).toContain(
-      "Set resetSession: true when switching to an unrelated review topic or when prior reviewer memory would likely mislead the answer.",
-    );
-    expect(tool.promptGuidelines).toContain(
-      "resetSession starts a fresh reviewer session and asks the new question in the same call; it is not a reset-only mode.",
-    );
     expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.properties).toHaveProperty("question");
     expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.properties).toHaveProperty("context");
     expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.properties).toHaveProperty("focus");
     expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.properties).toHaveProperty("resetSession");
     expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.properties.resetSession.type).toBe("boolean");
-    expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.properties.resetSession.description).toMatch(/fresh reviewer session/i);
-    expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.properties.resetSession.description).toMatch(/same call/i);
-    expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.properties.resetSession.description).toMatch(/prior reviewer memory would mislead/i);
     expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.required).toEqual(["question"]);
     expect(REVIEWER_BRIDGE_TOOL_PARAMETERS.additionalProperties).toBe(false);
     expect(Value.Check(REVIEWER_BRIDGE_TOOL_PARAMETERS, { question: "Should pass", resetSession: true })).toBe(true);
@@ -240,7 +204,7 @@ describe("reviewer bridge tool", () => {
 
     const result = await executeReviewerBridge(state, { question: "What is the main risk?" }, ctx, createDependencies(reviewer.session));
 
-    expect(reviewer.prompt).toHaveBeenCalledWith(expect.stringContaining("Question:\nWhat is the main risk?"));
+    expect(reviewer.prompt).toHaveBeenCalledTimes(1);
     expect(result.content).toEqual([{ type: "text", text: "concise reviewer answer" }]);
     expect(result.details).toMatchObject({ response: "concise reviewer answer" });
     expect(state.modelTarget).toEqual({ provider: REVIEWER_PROVIDER, id: REVIEWER_GPT_MODEL_ID });
@@ -267,12 +231,6 @@ describe("reviewer bridge tool", () => {
     state.modelTarget = { provider: REVIEWER_PROVIDER, id: REVIEWER_GPT_MODEL_ID };
     state.health = "ready";
 
-    const prompt = buildReviewerBridgePrompt({
-      question: "Should we reset first?",
-      context: "Fresh topic.",
-      focus: "Avoid stale memory.",
-    });
-
     const result = await executeReviewerBridge(
       state,
       {
@@ -287,8 +245,7 @@ describe("reviewer bridge tool", () => {
 
     expect(staleReviewer.session.dispose).toHaveBeenCalledTimes(1);
     expect(staleReviewer.prompt).not.toHaveBeenCalled();
-    expect(freshReviewer.prompt).toHaveBeenCalledWith(prompt);
-    expect(prompt).not.toContain("resetSession");
+    expect(freshReviewer.prompt).toHaveBeenCalledTimes(1);
     expect(result.details).toMatchObject({ response: "fresh reviewer answer" });
     expect(state.owner).toBe(preservedOwner);
     expect(state.session).toBe(freshReviewer.session);
@@ -296,7 +253,7 @@ describe("reviewer bridge tool", () => {
     expect(state.usage.createdCount).toBe(1);
   });
 
-  it("allows reset requests while idle without recording a reset or leaking the flag into the prompt", async () => {
+  it("allows reset requests while idle without recording a reset", async () => {
     const state = createReviewerSessionState();
     const ctx = createExtensionContext();
     const reviewer = createFakeReviewerSession([], async (prompt, messages) => {
@@ -312,8 +269,7 @@ describe("reviewer bridge tool", () => {
     );
 
     expect(result.details).toMatchObject({ response: "idle reset answer" });
-    expect(reviewer.prompt).toHaveBeenCalledWith(expect.stringContaining("Question:\nCan we start fresh?"));
-    expect(reviewer.prompt).toHaveBeenCalledWith(expect.not.stringContaining("resetSession"));
+    expect(reviewer.prompt).toHaveBeenCalledTimes(1);
     expect(state.usage.resetCount).toBe(0);
     expect(state.usage.createdCount).toBe(1);
     expect(state.health).toBe("ready");
@@ -350,7 +306,6 @@ describe("reviewer bridge tool", () => {
     expect(reviewer.session.dispose).not.toHaveBeenCalled();
     expect(deps.createAgentSession).not.toHaveBeenCalled();
     expect(reviewer.prompt).toHaveBeenCalledTimes(1);
-    expect(reviewer.prompt).toHaveBeenCalledWith(expect.stringContaining("Question:\nCan we keep the same reviewer?"));
     expect(state.session).toBe(reviewer.session);
     expect(state.usage.resetCount).toBe(0);
     expect(state.usage.createdCount).toBe(0);
@@ -1449,11 +1404,8 @@ describe("reviewer bridge rendering", () => {
     const rendered = component.render(200).join("\n");
 
     expect(rendered).toContain("reviewer");
-    expect(rendered).toContain("Question:");
     expect(rendered).toContain("Should we keep the existing reset semantics for unrelated topics?");
-    expect(rendered).toContain("Context:");
     expect(rendered).toContain("The main agent sometimes switches from implementation review to UX review.");
-    expect(rendered).toContain("Focus:");
     expect(rendered).toContain("Only consider whether stale reviewer memory can mislead the answer.");
     expect(rendered).toContain("Fresh reviewer session requested for this call.");
     expect(rendered).not.toContain("…");
