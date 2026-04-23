@@ -346,6 +346,8 @@ describe("reviewer session factory", () => {
     const options = buildReviewerResourceLoaderOptions("/repo");
 
     expect(options.cwd).toBe("/repo");
+    expect(typeof options.agentDir).toBe("string");
+    expect(options.agentDir?.length).toBeGreaterThan(0);
     expect(options.noExtensions).toBe(true);
     expect(options.noSkills).toBe(true);
     expect(options.noPromptTemplates).toBe(true);

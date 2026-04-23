@@ -3,6 +3,7 @@ import {
   createAgentSession,
   createReadOnlyTools,
   DefaultResourceLoader,
+  getAgentDir,
   ModelRegistry,
   SessionManager,
   type AgentSession,
@@ -69,6 +70,7 @@ function emptyAgentsFiles() {
 export function buildReviewerResourceLoaderOptions(cwd: string): ReviewerResourceLoaderOptions {
   return {
     cwd,
+    agentDir: getAgentDir(),
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,
