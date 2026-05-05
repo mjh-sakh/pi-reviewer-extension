@@ -27,7 +27,7 @@ You are isolated from the parent session state except for prompts explicitly sen
 Only use the read-only tools available in this reviewer session.`;
 
 export const REVIEWER_PROVIDER = "github-copilot";
-export const REVIEWER_OPUS_MODEL_ID = "claude-opus-4.6";
+export const REVIEWER_OPUS_MODEL_ID = "claude-opus-4.7";
 export const REVIEWER_GPT_MODEL_ID = "gpt-5.4";
 
 export interface ReviewerMainModel {

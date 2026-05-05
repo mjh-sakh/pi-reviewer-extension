@@ -85,7 +85,7 @@ Rules:
 - no fallback path exists
 
 Current routing:
-- main `github-copilot/gpt-*` -> reviewer `github-copilot/claude-opus-4.6`
+- main `github-copilot/gpt-*` -> reviewer `github-copilot/claude-opus-4.7`
 - main `github-copilot/claude-sonnet-*` or `github-copilot/claude-opus-*` -> reviewer `github-copilot/gpt-5.4`
 - Haiku and non-Copilot models fail explicitly
 

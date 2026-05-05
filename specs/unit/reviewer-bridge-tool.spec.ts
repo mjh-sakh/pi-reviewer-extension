@@ -1470,7 +1470,7 @@ describe("reviewer bridge rendering", () => {
           response: "Risk: the migration is unsafe.",
           turns: 2,
           usage: { input: 3000, output: 400, cacheRead: 0 },
-          model: "claude-opus-4.6:high",
+          model: "claude-opus-4.7:high",
         },
       },
       { isPartial: false, expanded: false },

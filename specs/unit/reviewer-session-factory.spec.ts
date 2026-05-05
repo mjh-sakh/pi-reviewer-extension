@@ -288,7 +288,7 @@ describe("reviewer session factory", () => {
     const deps = createDependencies();
     const ctx = {
       ...createOwnerContext("main-1"),
-      model: createMainModel("claude-opus-4.6"),
+      model: createMainModel("claude-opus-4.7"),
     };
 
     deps.dependencies.createAgentSession = vi
@@ -379,7 +379,7 @@ describe("reviewer session factory", () => {
       provider: REVIEWER_PROVIDER,
       id: REVIEWER_GPT_MODEL_ID,
     });
-    expect(selectReviewerModelTarget(createMainModel("claude-opus-4.6"))).toEqual({
+    expect(selectReviewerModelTarget(createMainModel("claude-opus-4.7"))).toEqual({
       provider: REVIEWER_PROVIDER,
       id: REVIEWER_GPT_MODEL_ID,
     });
