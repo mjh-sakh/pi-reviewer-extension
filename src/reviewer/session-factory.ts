@@ -30,6 +30,11 @@ export const REVIEWER_PROVIDER = "github-copilot";
 export const REVIEWER_OPUS_MODEL_ID = "claude-opus-4.7";
 export const REVIEWER_GPT_MODEL_ID = "gpt-5.4";
 
+const REVIEWER_DEFAULT_THINKING_LEVEL = "high" as const;
+const REVIEWER_FALLBACK_THINKING_LEVEL = "off" as const;
+
+type ReviewerThinkingLevel = typeof REVIEWER_DEFAULT_THINKING_LEVEL | typeof REVIEWER_FALLBACK_THINKING_LEVEL;
+
 export interface ReviewerMainModel {
   provider: string;
   id: string;
@@ -173,6 +178,18 @@ export function resolveReviewerModel(target: ReviewerModelTarget, modelRegistry:
   return reviewerModel;
 }
 
+export function selectReviewerThinkingLevel(model: unknown): ReviewerThinkingLevel {
+  if (!model || typeof model !== "object") {
+    return REVIEWER_DEFAULT_THINKING_LEVEL;
+  }
+
+  const record = model as {
+    reasoning?: unknown;
+  };
+
+  return record.reasoning === false ? REVIEWER_FALLBACK_THINKING_LEVEL : REVIEWER_DEFAULT_THINKING_LEVEL;
+}
+
 export async function ensureReviewerSessionLocked(
   state: ReviewerSessionState,
   ctx: ReviewerSessionFactoryContext,
@@ -211,12 +228,13 @@ export async function ensureReviewerSessionLocked(
     await resourceLoader.reload();
 
     const reviewerModel = resolveReviewerModel(target, modelRegistry);
+    const reviewerThinkingLevel = selectReviewerThinkingLevel(reviewerModel);
     const result = await dependencies.createAgentSession({
       cwd: ctx.cwd,
       authStorage,
       modelRegistry,
       model: reviewerModel,
-      thinkingLevel: "high",
+      thinkingLevel: reviewerThinkingLevel,
       resourceLoader,
       sessionManager: dependencies.createInMemorySessionManager(),
       tools: dependencies.createReadOnlyTools(ctx.cwd),

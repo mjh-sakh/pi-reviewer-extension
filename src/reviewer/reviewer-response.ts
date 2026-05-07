@@ -15,6 +15,11 @@ interface ReviewerTextContent {
   text: string;
 }
 
+interface ReviewerAssistantErrorShape {
+  stopReason?: unknown;
+  errorMessage?: unknown;
+}
+
 function normalizeOptionalField(value: string | undefined) {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
@@ -67,9 +72,29 @@ function isTextContent(content: unknown): content is ReviewerTextContent {
   );
 }
 
+function getReviewerAssistantFailureMessage(message: ReviewerAssistantMessage) {
+  const maybeError = message as ReviewerAssistantErrorShape;
+
+  if (maybeError.stopReason !== "error") {
+    return undefined;
+  }
+
+  if (typeof maybeError.errorMessage !== "string") {
+    return "Reviewer invocation failed without an error message.";
+  }
+
+  const normalized = compactReviewerText(maybeError.errorMessage);
+  return normalized || "Reviewer invocation failed without an error message.";
+}
+
 export function extractReviewerTextFromAssistantMessage(message: ReviewerSessionMessage) {
   if (!isAssistantMessage(message)) {
     throw new Error("Reviewer response extraction requires an assistant message.");
+  }
+
+  const failureMessage = getReviewerAssistantFailureMessage(message);
+  if (failureMessage) {
+    throw new Error(`Reviewer invocation failed: ${failureMessage}`);
   }
 
   if (!Array.isArray(message.content)) {

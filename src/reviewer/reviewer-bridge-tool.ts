@@ -99,6 +99,51 @@ function toErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+const REVIEWER_THINKING_FALLBACK_LADDER = ["high", "medium", "low", "minimal", "off"] as const;
+
+type ReviewerThinkingFallbackLevel = (typeof REVIEWER_THINKING_FALLBACK_LADDER)[number];
+
+function getReviewerModelLabel(session: { model?: { id: string }; thinkingLevel?: unknown }) {
+  return session.model ? `${session.model.id}:${session.thinkingLevel}` : undefined;
+}
+
+function isInvalidReasoningEffortError(error: unknown) {
+  const message = toErrorMessage(error);
+  return /invalid_reasoning_effort|output_config\.effort/i.test(message);
+}
+
+function getNextReviewerThinkingFallbackLevel(
+  currentLevel: unknown,
+  attemptedLevels: ReadonlySet<string>,
+): ReviewerThinkingFallbackLevel | undefined {
+  const normalized = typeof currentLevel === "string" ? currentLevel : undefined;
+  const startIndex = normalized ? REVIEWER_THINKING_FALLBACK_LADDER.indexOf(normalized as ReviewerThinkingFallbackLevel) : -1;
+
+  if (startIndex === -1) {
+    return undefined;
+  }
+
+  for (let i = startIndex + 1; i < REVIEWER_THINKING_FALLBACK_LADDER.length; i++) {
+    const candidate = REVIEWER_THINKING_FALLBACK_LADDER[i];
+    if (!attemptedLevels.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+function rollbackReviewerAttemptMessages(
+  session: { messages: unknown[]; agent?: { state?: { messages: unknown[] } } },
+  messageBoundary: number,
+) {
+  const rolledBackMessages = session.messages.slice(0, messageBoundary);
+
+  if (session.agent?.state) {
+    session.agent.state.messages = rolledBackMessages;
+  }
+}
+
 export async function executeReviewerBridge(
   state: ReviewerSessionState,
   params: ReviewerBridgeToolParams,
@@ -150,10 +195,6 @@ export async function executeReviewerBridge(
       signal?.addEventListener("abort", onAbort, { once: true });
 
       try {
-        const modelLabel = session.model
-          ? `${session.model.id}:${session.thinkingLevel}`
-          : undefined;
-
         let turns = 0;
         const accumulated: ReviewerBridgeUsage = { input: 0, output: 0, cacheRead: 0 };
 
@@ -190,6 +231,7 @@ export async function executeReviewerBridge(
             accumulated.cacheRead += safeNum(u.cacheRead);
             turns++;
             try {
+              const modelLabel = getReviewerModelLabel(session);
               onUpdate?.({
                 content: [{ type: "text", text: formatReviewerUsage(turns, accumulated, modelLabel) }],
                 details: { turns, usage: publicUsage(), model: modelLabel },
@@ -199,34 +241,67 @@ export async function executeReviewerBridge(
             }
           });
 
-          const messageBoundary = session.messages.length;
-          await session.prompt(prompt);
+          const attemptedThinkingLevels = new Set<string>();
 
-          // Post-prompt abort guard: session.abort() may cause prompt() to resolve rather than reject.
-          // Do not record success or extract a potentially partial response.
-          if (abortRequested) {
-            throw new Error("Reviewer bridge aborted during prompt");
+          while (true) {
+            attemptedThinkingLevels.add(String(session.thinkingLevel));
+            const turnsBeforeAttempt = turns;
+            const usageBeforeAttempt = { ...accumulated };
+            const messageBoundary = session.messages.length;
+
+            try {
+              await session.prompt(prompt);
+
+              // Post-prompt abort guard: session.abort() may cause prompt() to resolve rather than reject.
+              // Do not record success or extract a potentially partial response.
+              if (abortRequested) {
+                throw new Error("Reviewer bridge aborted during prompt");
+              }
+
+              const response = extractCurrentReviewerResponseText(session.messages, messageBoundary);
+              safeUnsubscribe(); // stop before maintenance so compaction turns are not counted
+
+              // Remove listener before maintenance: a late abort must not call session.abort()
+              // during compaction. The outer finally is a no-op after this.
+              signal?.removeEventListener("abort", onAbort);
+
+              recordReviewerInvocationSuccess(state);
+              await runReviewerMaintenanceLocked(state, session);
+
+              return {
+                content: [{ type: "text" as const, text: response }],
+                details: {
+                  response,
+                  turns,
+                  usage: publicUsage(),
+                  model: getReviewerModelLabel(session),
+                } satisfies ReviewerBridgeToolDetails,
+              };
+            } catch (error) {
+              const nextThinkingLevel = getNextReviewerThinkingFallbackLevel(session.thinkingLevel, attemptedThinkingLevels);
+              if (!abortRequested && isInvalidReasoningEffortError(error) && nextThinkingLevel) {
+                rollbackReviewerAttemptMessages(session as unknown as { messages: unknown[]; agent?: { state?: { messages: unknown[] } } }, messageBoundary);
+                accumulated.input = usageBeforeAttempt.input;
+                accumulated.output = usageBeforeAttempt.output;
+                accumulated.cacheRead = usageBeforeAttempt.cacheRead;
+                turns = turnsBeforeAttempt;
+                session.setThinkingLevel(nextThinkingLevel);
+
+                try {
+                  onUpdate?.({
+                    content: [{ type: "text", text: `Retrying reviewer with lower thinking level (${nextThinkingLevel})...` }],
+                    details: { turns, usage: publicUsage(), model: getReviewerModelLabel(session) },
+                  });
+                } catch {
+                  // onUpdate errors must not interrupt reviewer execution
+                }
+
+                continue;
+              }
+
+              throw error;
+            }
           }
-
-          const response = extractCurrentReviewerResponseText(session.messages, messageBoundary);
-          safeUnsubscribe(); // stop before maintenance so compaction turns are not counted
-
-          // Remove listener before maintenance: a late abort must not call session.abort()
-          // during compaction. The outer finally is a no-op after this.
-          signal?.removeEventListener("abort", onAbort);
-
-          recordReviewerInvocationSuccess(state);
-          await runReviewerMaintenanceLocked(state, session);
-
-          return {
-            content: [{ type: "text" as const, text: response }],
-            details: {
-              response,
-              turns,
-              usage: publicUsage(),
-              model: modelLabel,
-            } satisfies ReviewerBridgeToolDetails,
-          };
         } catch (error) {
           safeUnsubscribe(); // stop tracking before failure handling, which may reset/dispose session
           if (!abortRequested) {

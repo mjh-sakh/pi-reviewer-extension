@@ -81,6 +81,60 @@ function createFakeReviewerSession(
   };
 }
 
+function createThinkingFallbackReviewerSession(responseText = "fallback answer") {
+  const messages: unknown[] = [];
+  let thinkingLevel: "high" | "medium" | "low" | "minimal" | "off" = "high";
+
+  const prompt = vi.fn(async (input: string) => {
+    messages.push(createUserMessage(input));
+
+    if (thinkingLevel === "high") {
+      messages.push({
+        ...createAssistantMessage("ignored"),
+        content: [],
+        stopReason: "error",
+        errorMessage: '400 {"error":{"message":"invalid_reasoning_effort"}}',
+      });
+      return;
+    }
+
+    messages.push(createAssistantMessage(responseText));
+  });
+
+  const session = {
+    sessionId: "reviewer-thinking-fallback",
+    messages,
+    prompt,
+    dispose: vi.fn(),
+    subscribe: vi.fn(() => vi.fn()),
+    model: { id: REVIEWER_OPUS_MODEL_ID, provider: REVIEWER_PROVIDER },
+    get thinkingLevel() {
+      return thinkingLevel;
+    },
+    setThinkingLevel: vi.fn((level: "high" | "medium" | "low" | "minimal" | "off") => {
+      thinkingLevel = level;
+    }),
+    agent: {
+      state: {
+        get messages() {
+          return messages as AgentSession["messages"];
+        },
+        set messages(nextMessages: AgentSession["messages"]) {
+          messages.splice(0, messages.length, ...nextMessages);
+        },
+      },
+    },
+  } as unknown as AgentSession;
+
+  return {
+    session,
+    messages,
+    prompt,
+    getThinkingLevel: () => thinkingLevel,
+    setThinkingLevel: (session as unknown as { setThinkingLevel: ReturnType<typeof vi.fn> }).setThinkingLevel,
+  };
+}
+
 type ReviewerResourceLoader = NonNullable<CreateAgentSessionOptions["resourceLoader"]>;
 type ReviewerTools = NonNullable<CreateAgentSessionOptions["tools"]>;
 
@@ -155,7 +209,7 @@ describe("reviewer response helpers", () => {
     ).toThrow(/no new assistant output/i);
   });
 
-  it("throws explicit errors for malformed or empty assistant output", () => {
+  it("throws explicit errors for malformed, empty, or provider-error assistant output", () => {
     expect(() =>
       extractReviewerTextFromAssistantMessage({
         ...createAssistantMessage("ignored"),
@@ -169,6 +223,15 @@ describe("reviewer response helpers", () => {
         content: [{ type: "text", text: "   " }],
       } as unknown as AgentSession["messages"][number]),
     ).toThrow(/empty assistant response/i);
+
+    expect(() =>
+      extractReviewerTextFromAssistantMessage({
+        ...createAssistantMessage("ignored"),
+        content: [],
+        stopReason: "error",
+        errorMessage: "invalid_reasoning_effort",
+      } as unknown as AgentSession["messages"][number]),
+    ).toThrow(/reviewer invocation failed: invalid_reasoning_effort/i);
 
     expect(() => extractCurrentReviewerResponseText([createUserMessage("new prompt")] as AgentSession["messages"], 0)).toThrow(
       /no new assistant output/i,
@@ -208,6 +271,37 @@ describe("reviewer bridge tool", () => {
     expect(result.content).toEqual([{ type: "text", text: "concise reviewer answer" }]);
     expect(result.details).toMatchObject({ response: "concise reviewer answer" });
     expect(state.modelTarget).toEqual({ provider: REVIEWER_PROVIDER, id: REVIEWER_GPT_MODEL_ID });
+  });
+
+  it("starts at high and falls back down the thinking ladder when reasoning effort is rejected", async () => {
+    const state = createReviewerSessionState();
+    const reviewer = createThinkingFallbackReviewerSession("answer after fallback");
+    const ctx = createExtensionContext();
+    const partials: string[] = [];
+    const onUpdate = vi.fn((result: { content: Array<{ type: string; text: string }> }) => {
+      partials.push(result.content[0]?.text ?? "");
+    });
+
+    const result = await executeReviewerBridge(
+      state,
+      { question: "Can you recover after a reasoning-effort rejection?" },
+      ctx,
+      createDependencies(reviewer.session),
+      onUpdate,
+    );
+
+    expect(reviewer.prompt).toHaveBeenCalledTimes(2);
+    expect(reviewer.setThinkingLevel).toHaveBeenCalledWith("medium");
+    expect(reviewer.getThinkingLevel()).toBe("medium");
+    expect(result.details).toMatchObject({
+      response: "answer after fallback",
+      model: `${REVIEWER_OPUS_MODEL_ID}:medium`,
+    });
+    expect(reviewer.messages).toEqual([
+      expect.objectContaining({ role: "user" }),
+      expect.objectContaining({ role: "assistant", content: [{ type: "text", text: "answer after fallback" }] }),
+    ]);
+    expect(partials).toContain("Retrying reviewer with lower thinking level (medium)...");
   });
 
   it("resets the reviewer session atomically before recreating and prompting when requested", async () => {
@@ -524,7 +618,7 @@ describe("reviewer bridge tool", () => {
     expect(state.usage.consecutiveInvocationFailureCount).toBe(0);
   });
 
-  it("surfaces empty or malformed reviewer output and missing main-model errors explicitly", async () => {
+  it("surfaces malformed, empty, provider-error, and missing main-model failures explicitly", async () => {
     const state = createReviewerSessionState();
     const malformedReviewer = createFakeReviewerSession([], async (_prompt, messages) => {
       messages.push({ ...createAssistantMessage("ignored"), content: [{ nope: true }] });
@@ -551,6 +645,24 @@ describe("reviewer bridge tool", () => {
         createDependencies(emptyReviewer.session),
       ),
     ).rejects.toThrow(/reviewer bridge failed: reviewer invocation produced an empty assistant response/i);
+
+    const providerErrorReviewer = createFakeReviewerSession([], async (_prompt, messages) => {
+      messages.push({
+        ...createAssistantMessage("ignored"),
+        content: [],
+        stopReason: "error",
+        errorMessage: '400 {"error":{"message":"invalid_reasoning_effort"}}',
+      });
+    });
+
+    await expect(
+      executeReviewerBridge(
+        createReviewerSessionState(),
+        { question: "Did the provider reject the config?" },
+        createExtensionContext(),
+        createDependencies(providerErrorReviewer.session),
+      ),
+    ).rejects.toThrow(/reviewer bridge failed: reviewer invocation failed: 400 .*invalid_reasoning_effort/i);
 
     await expect(
       executeReviewerBridge(

@@ -79,10 +79,11 @@ The reviewer is intentionally narrow and deterministic.
 
 Rules:
 - provider must be `github-copilot`
-- thinking level is always `high`
+- thinking level starts at `high` for reasoning-capable reviewer models
+- if the provider rejects that reasoning effort at runtime, the bridge falls back down a fixed ladder: `high -> medium -> low -> minimal -> off`
 - reviewer model must be the opposite family from the active main model
 - unsupported main models or missing reviewer models fail explicitly during reviewer-session creation
-- no fallback path exists
+- no fallback path exists for the model itself
 
 Current routing:
 - main `github-copilot/gpt-*` -> reviewer `github-copilot/claude-opus-4.7`
@@ -90,6 +91,8 @@ Current routing:
 - Haiku and non-Copilot models fail explicitly
 
 The point is to force an actual second-opinion model, not a loosely similar fallback.
+
+Important runtime detail: current Pi runtime can reject `high` for `github-copilot/claude-opus-4.7` with `invalid_reasoning_effort`, which is why the bridge now retries the same reviewer prompt at progressively lower thinking levels instead of relying only on static model metadata.
 
 ## Why `REVIEWER_EXTENSION_ID` exists
 

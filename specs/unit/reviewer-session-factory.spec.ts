@@ -18,6 +18,7 @@ import {
   isSameReviewerModelTarget,
   resolveReviewerModel,
   selectReviewerModelTarget,
+  selectReviewerThinkingLevel,
   withReviewerSession,
   type ReviewerMainModel,
   type ReviewerSessionFactoryDependencies,
@@ -359,6 +360,48 @@ describe("reviewer session factory", () => {
     });
 
     expect(() => assertReviewerResourceLoaderIsolation(options)).not.toThrow();
+  });
+
+  it("starts reviewer sessions at high thinking when the model supports reasoning", async () => {
+    const state = createReviewerSessionState();
+    const deps = createDependencies();
+    deps.modelRegistry.find = vi.fn(
+      (_provider: string, modelId: string) =>
+        ({
+          provider: REVIEWER_PROVIDER,
+          id: modelId,
+          reasoning: true,
+          thinkingLevelMap: {
+            high: null,
+            medium: "medium",
+            low: "low",
+            minimal: "minimal",
+          },
+        }) as unknown as ReturnType<ModelRegistry["find"]>,
+    );
+
+    const ctx = {
+      ...createOwnerContext("main-1", "/sessions/main-1.jsonl"),
+      model: createMainModel("gpt-5.4"),
+    };
+
+    await ensureReviewerSession(state, ctx, deps.dependencies);
+
+    const createSessionOptions = deps.createAgentSession.mock.calls[0]?.[0];
+    expect(createSessionOptions?.thinkingLevel).toBe("high");
+  });
+
+  it("selects reviewer thinking levels conservatively from basic reasoning support", () => {
+    expect(selectReviewerThinkingLevel(undefined)).toBe("high");
+    expect(selectReviewerThinkingLevel({ reasoning: false })).toBe("off");
+    expect(selectReviewerThinkingLevel({ reasoning: true })).toBe("high");
+    expect(selectReviewerThinkingLevel({ id: "claude-opus-4.7", reasoning: true })).toBe("high");
+    expect(
+      selectReviewerThinkingLevel({
+        reasoning: true,
+        thinkingLevelMap: { high: null, medium: "medium", low: "low", minimal: "minimal" },
+      }),
+    ).toBe("high");
   });
 
   it("fails explicitly for unsupported model policy and missing reviewer target model", () => {
