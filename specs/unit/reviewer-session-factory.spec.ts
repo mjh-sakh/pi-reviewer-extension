@@ -5,7 +5,7 @@ import {
   type CreateAgentSessionOptions,
   type ModelRegistry,
   type SessionManager,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -35,6 +35,7 @@ function createFakeSession(name: string) {
     sessionId: name,
     sessionFile: undefined,
     dispose: vi.fn(),
+    setAutoCompactionEnabled: vi.fn(),
   } as unknown as AgentSession;
 }
 
@@ -98,6 +99,21 @@ function createDependencies(overrides: Partial<ReviewerSessionFactoryDependencie
 }
 
 describe("reviewer session factory", () => {
+  it("disables SDK auto-compaction on the created session so reviewer-maintenance handles it exclusively", async () => {
+    const state = createReviewerSessionState();
+    const deps = createDependencies();
+    const ctx = {
+      ...createOwnerContext("main-1", "/sessions/main-1.jsonl"),
+      model: createMainModel("gpt-5.4"),
+    };
+
+    const session = await ensureReviewerSession(state, ctx, deps.dependencies);
+
+    expect(
+      (session.setAutoCompactionEnabled as unknown as ReturnType<typeof vi.fn>),
+    ).toHaveBeenCalledWith(false);
+  });
+
   it("creates and reuses a reviewer session for the same owner", async () => {
     const state = createReviewerSessionState();
     const deps = createDependencies();
@@ -456,25 +472,17 @@ describe("reviewer session factory", () => {
   it("detects isolated loader misconfiguration via upfront prevention assertions", () => {
     expect(() =>
       assertReviewerResourceLoaderIsolation({
+        ...buildReviewerResourceLoaderOptions("/tmp"),
         noExtensions: false,
-        noSkills: true,
-        noPromptTemplates: true,
-        noThemes: true,
         systemPromptOverride: () => "ok",
-        appendSystemPromptOverride: () => [],
-        agentsFilesOverride: () => ({ agentsFiles: [] }),
       }),
     ).toThrow(/noExtensions: true/i);
 
     expect(() =>
       assertReviewerResourceLoaderIsolation({
-        noExtensions: true,
-        noSkills: true,
-        noPromptTemplates: true,
-        noThemes: true,
+        ...buildReviewerResourceLoaderOptions("/tmp"),
         systemPromptOverride: () => "ok",
         appendSystemPromptOverride: () => ["should-not-be-here"],
-        agentsFilesOverride: () => ({ agentsFiles: [] }),
       }),
     ).toThrow(/suppress appended system prompt content/i);
   });

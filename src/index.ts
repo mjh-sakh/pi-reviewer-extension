@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { createReviewerBridgeTool } from "./reviewer/reviewer-bridge-tool.ts";
 import {
@@ -22,14 +22,6 @@ export function registerReviewerExtension(
 
   pi.on("session_start", async (_event, ctx) => {
     await claimReviewerSessionOwner(reviewerState, ctx, "session_start");
-  });
-
-  pi.on("session_switch", async (_event, ctx) => {
-    await claimReviewerSessionOwner(reviewerState, ctx, "session_switch");
-  });
-
-  pi.on("session_fork", async (_event, ctx) => {
-    await claimReviewerSessionOwner(reviewerState, ctx, "session_fork");
   });
 
   pi.on("session_shutdown", async () => {

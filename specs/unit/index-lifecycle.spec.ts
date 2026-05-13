@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
 import { registerReviewerExtension } from "../../src/index.ts";
@@ -50,13 +50,8 @@ describe("reviewer extension lifecycle wiring", () => {
 
     expect(api.registerTool).toHaveBeenCalledTimes(1);
     expect(api.registerTool.mock.calls[0]?.[0].name).toBe(REVIEWER_BRIDGE_TOOL_NAME);
-    expect(api.on).toHaveBeenCalledTimes(4);
-    expect([...api.handlers.keys()].sort()).toEqual([
-      "session_fork",
-      "session_shutdown",
-      "session_start",
-      "session_switch",
-    ]);
+    expect(api.on).toHaveBeenCalledTimes(2);
+    expect([...api.handlers.keys()].sort()).toEqual(["session_shutdown", "session_start"]);
     expect(runtime.state.session).toBeUndefined();
     expect(runtime.state.health).toBe("idle");
     expect(runtime.state.usage.createdCount).toBe(0);
@@ -89,11 +84,10 @@ describe("reviewer extension lifecycle wiring", () => {
     expect(runtime.state.usage.resetCount).toBe(0);
   });
 
-  it("resets reviewer state when session_switch moves to a different main session", async () => {
+  it("resets reviewer state when session_start observes a different main session", async () => {
     const api = createExtensionApi();
     const runtime = registerReviewerExtension(api.pi);
     const sessionStart = api.handlers.get("session_start");
-    const sessionSwitch = api.handlers.get("session_switch");
     const reviewer = createReviewerSessionDouble();
 
     await sessionStart?.({}, createLifecycleContext("main-1"));
@@ -101,33 +95,13 @@ describe("reviewer extension lifecycle wiring", () => {
     runtime.state.modelTarget = { provider: REVIEWER_PROVIDER, id: REVIEWER_GPT_MODEL_ID };
     runtime.state.health = "ready";
 
-    await sessionSwitch?.({}, createLifecycleContext("main-2"));
+    await sessionStart?.({}, createLifecycleContext("main-2"));
 
     expect(reviewer.dispose).toHaveBeenCalledTimes(1);
     expect(runtime.state.session).toBeUndefined();
     expect(runtime.state.modelTarget).toBeUndefined();
     expect(runtime.state.health).toBe("idle");
     expect(runtime.state.owner?.stableIdentity).toBe("file:/sessions/main-2.jsonl");
-    expect(runtime.state.usage.resetCount).toBe(1);
-  });
-
-  it("resets reviewer state when session_fork creates a new owner boundary", async () => {
-    const api = createExtensionApi();
-    const runtime = registerReviewerExtension(api.pi);
-    const sessionStart = api.handlers.get("session_start");
-    const sessionFork = api.handlers.get("session_fork");
-    const reviewer = createReviewerSessionDouble();
-
-    await sessionStart?.({}, createLifecycleContext("main-1"));
-    runtime.state.session = reviewer as never;
-    runtime.state.modelTarget = { provider: REVIEWER_PROVIDER, id: REVIEWER_GPT_MODEL_ID };
-    runtime.state.health = "ready";
-
-    await sessionFork?.({}, createLifecycleContext("fork-1", "/sessions/fork-1.jsonl"));
-
-    expect(reviewer.dispose).toHaveBeenCalledTimes(1);
-    expect(runtime.state.session).toBeUndefined();
-    expect(runtime.state.owner?.stableIdentity).toBe("file:/sessions/fork-1.jsonl");
     expect(runtime.state.usage.resetCount).toBe(1);
   });
 

@@ -1,4 +1,4 @@
-import type { ContextUsage } from "@mariozechner/pi-coding-agent";
+import type { ContextUsage } from "@earendil-works/pi-coding-agent";
 
 export const COMPACTION_CONTEXT_PERCENT_THRESHOLD = 0.8;
 export const MAX_CONSECUTIVE_INVOCATION_FAILURES = 3;

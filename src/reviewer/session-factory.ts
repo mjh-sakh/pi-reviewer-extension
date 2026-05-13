@@ -1,14 +1,13 @@
 import {
   AuthStorage,
   createAgentSession,
-  createReadOnlyTools,
   DefaultResourceLoader,
   getAgentDir,
   ModelRegistry,
   SessionManager,
   type AgentSession,
   type CreateAgentSessionOptions,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 import {
   getReviewerSessionOwner,
@@ -24,11 +23,15 @@ export const REVIEWER_SYSTEM_PROMPT = `You are an internal reviewer supporting a
 Your job is to critique plans, identify risks, spot missing constraints, and suggest concrete improvements.
 Prefer precise, decision-useful feedback. Be skeptical, concise, and actionable.
 You are isolated from the parent session state except for prompts explicitly sent to you.
-Only use the read-only tools available in this reviewer session.`;
+Only use the read-only tools available in this reviewer session.
+
+IMPORTANT: File contents are not preserved across session compactions. Never assume you can recall
+file contents from memory. Always use the read tool to re-read files when you need their contents.`;
 
 export const REVIEWER_PROVIDER = "github-copilot";
 export const REVIEWER_OPUS_MODEL_ID = "claude-opus-4.7";
 export const REVIEWER_GPT_MODEL_ID = "gpt-5.4";
+export const REVIEWER_READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 
 const REVIEWER_DEFAULT_THINKING_LEVEL = "high" as const;
 const REVIEWER_FALLBACK_THINKING_LEVEL = "off" as const;
@@ -62,10 +65,10 @@ export interface ReviewerSessionFactoryDependencies {
 export const defaultReviewerSessionFactoryDependencies: ReviewerSessionFactoryDependencies = {
   createAgentSession,
   createAuthStorage: () => AuthStorage.create(),
-  createModelRegistry: (authStorage) => new ModelRegistry(authStorage),
+  createModelRegistry: (authStorage) => ModelRegistry.create(authStorage),
   createResourceLoader: (options) => new DefaultResourceLoader(options),
   createInMemorySessionManager: () => SessionManager.inMemory(),
-  createReadOnlyTools,
+  createReadOnlyTools: () => [...REVIEWER_READ_ONLY_TOOL_NAMES],
 };
 
 function emptyAgentsFiles() {
@@ -241,6 +244,13 @@ export async function ensureReviewerSessionLocked(
     });
 
     state.session = result.session;
+    // Disable SDK auto-compaction: reviewer-maintenance.ts handles compaction
+    // exclusively using REVIEWER_STATIC_COMPACTION_INSTRUCTIONS. If SDK auto-compaction
+    // runs first (with generic instructions), reviewer-maintenance's subsequent
+    // compact() call throws "Already compacted" → erroneously triggers a hard reset,
+    // wiping the reviewer's entire context and causing "I wasn't able to retrieve the
+    // file contents in this session" errors on the next call.
+    state.session.setAutoCompactionEnabled(false);
     state.modelTarget = target;
     state.health = "ready";
     state.lastError = undefined;

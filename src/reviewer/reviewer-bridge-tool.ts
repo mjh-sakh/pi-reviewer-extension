@@ -1,6 +1,6 @@
-import type { AgentSessionEvent, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import type { AgentSessionEvent, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import { Text } from "@mariozechner/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 
 import {
   ensureReviewerSessionLocked,

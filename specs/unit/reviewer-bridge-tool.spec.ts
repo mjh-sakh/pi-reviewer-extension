@@ -5,7 +5,7 @@ import type {
   ExtensionContext,
   ModelRegistry,
   SessionManager,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it, vi } from "vitest";
 
@@ -75,6 +75,7 @@ function createFakeReviewerSession(
       prompt,
       dispose: vi.fn(),
       subscribe: vi.fn(() => vi.fn()),
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession,
     messages,
     prompt,
@@ -114,6 +115,7 @@ function createThinkingFallbackReviewerSession(responseText = "fallback answer")
     setThinkingLevel: vi.fn((level: "high" | "medium" | "low" | "minimal" | "off") => {
       thinkingLevel = level;
     }),
+    setAutoCompactionEnabled: vi.fn(),
     agent: {
       state: {
         get messages() {
@@ -728,6 +730,7 @@ function createFakeReviewerSessionWithTurnEvents(
       dispose: vi.fn(),
       model: { id: modelId, provider: REVIEWER_PROVIDER },
       thinkingLevel,
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession,
     messages,
     prompt,
@@ -772,6 +775,7 @@ function createInterruptibleReviewerSession(responseText = "interruptible answer
     dispose: vi.fn(),
     model: undefined,
     thinkingLevel: "off",
+    setAutoCompactionEnabled: vi.fn(),
   } as unknown as AgentSession;
 
   return {
@@ -949,6 +953,7 @@ describe("reviewer bridge usage tracking", () => {
       dispose: vi.fn(),
       model: { id: REVIEWER_OPUS_MODEL_ID, provider: REVIEWER_PROVIDER },
       thinkingLevel: "high",
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession;
 
     // Intercept runReviewerMaintenanceLocked by firing a spurious turn_end after prompt returns
@@ -1014,6 +1019,7 @@ describe("reviewer bridge usage tracking", () => {
       dispose: vi.fn(),
       model: undefined,
       thinkingLevel: "off",
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession;
 
     await expect(
@@ -1048,6 +1054,7 @@ describe("reviewer bridge usage tracking", () => {
       dispose: vi.fn(),
       model: undefined,
       thinkingLevel: "off",
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession;
 
     const result = await executeReviewerBridge(
@@ -1095,6 +1102,7 @@ describe("reviewer bridge usage tracking", () => {
       dispose: vi.fn(),
       model: undefined,
       thinkingLevel: "off",
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession;
 
     const result = await executeReviewerBridge(
@@ -1151,6 +1159,7 @@ describe("reviewer bridge usage tracking", () => {
       dispose: vi.fn(),
       model: undefined,
       thinkingLevel: "off",
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession;
 
     const onUpdate = vi.fn();
@@ -1180,6 +1189,7 @@ describe("reviewer bridge usage tracking", () => {
       dispose: vi.fn(),
       model: undefined,
       thinkingLevel: "off",
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession;
 
     await expect(
@@ -1227,6 +1237,7 @@ describe("reviewer bridge usage tracking", () => {
       dispose: vi.fn(),
       model: undefined,
       thinkingLevel: "off",
+      setAutoCompactionEnabled: vi.fn(),
     } as unknown as AgentSession;
 
     await expect(

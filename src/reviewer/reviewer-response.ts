@@ -1,4 +1,4 @@
-import type { AgentSession } from "@mariozechner/pi-coding-agent";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 export interface ReviewerBridgePromptInput {
   question: string;
@@ -40,7 +40,7 @@ export function buildReviewerBridgePrompt(input: ReviewerBridgePromptInput) {
 
   const sections = [
     "You are being consulted as an internal reviewer for the current task.",
-    "Respond with concise, decision-useful feedback for the calling agent.",
+    "If the context mentions file paths or code, use your tools to read them before answering.",
     "Prefer concrete risks, missing constraints, and a recommended next step.",
     "",
     `Question:\n${question}`,
